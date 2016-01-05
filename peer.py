@@ -11,15 +11,12 @@ import logging
 
 
 if len(sys.argv) != 3:
-	print "usage: ./peer.py <nb_peers> <peer_id>"
+	print "usage: ./peer.py <hosts_file> <peer_id>"
 	sys.exit(1)
 
 
-base_port = 12345
-nb_peers = int(sys.argv[1])
+hosts_file = sys.argv[1]
 peer_id = int(sys.argv[2]) - 1
-
-peers_ids = range(nb_peers);
 
 
 logfile_name = 'process%d.log'%(peer_id)
@@ -28,17 +25,14 @@ with open(logfile_name, 'w'): pass
 logging.basicConfig(filename=logfile_name, level=logging.DEBUG)
 
 
-host = socket.gethostbyname(socket.gethostname())
-port = base_port + peer_id
+endpoints = map(lambda u: (u.split(":")[0], int(u.split(":")[1])), open(hosts_file).read().split())
 
-peer_addr = (host, port)
+nb_peers = len(endpoints)
+peers_ids = range(nb_peers);
+peer_addr = endpoints[peer_id]
 
 print "peer started:", peer_addr, "id=", peer_id
 logging.info("peer started:" + str(peer_addr))
-
-ports = range(base_port, base_port + nb_peers)
-hosts = [host] * nb_peers
-endpoints = zip(hosts, ports)
 
 
 sockets_lst = [None] * nb_peers
@@ -70,8 +64,9 @@ def init_sockets():
 	# --> socket.SOCK_DGRAM
 	create_socket = lambda: socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 
+	global serversocket
 	serversocket = create_socket()
-	serversocket.bind((host, port))
+	serversocket.bind(peer_addr)
 	serversocket.listen(nb_peers)
 
 	logging.debug('init_sockets: connect..')
@@ -155,9 +150,8 @@ class PerfectFailureDetector(threading.Thread):
 		self.send_heartbeat()
 		threading.Timer(self.delta * 2, self.timeout).start()
 
-	def get_alive_including_me(self):
-		return set(list(self.alive))
-		return set(list(self.alive) + [peer_id])
+	def get_correct(self):
+		return set(self.alive)
 
 	def timeout(self):
 		# logging.debug('PerfectFailureDetector: timeout ' + str(self.ack_buffer))
@@ -237,7 +231,7 @@ class UniformReliableBroadcast():
 	def packet_received(self, msg, sender_id):
 
 		logging.debug('UniformReliableBroadcast: deliver %s' % msg)
-		org_sender_id, seq_nb, payload = eval(msg)		
+		org_sender_id, seq_nb, payload = eval(msg)
 
 		if not (org_sender_id, seq_nb) in self.ack_buffer:
 			self.ackDictLock.acquire()
@@ -262,7 +256,7 @@ class UniformReliableBroadcast():
 			return
 		self.deliverLock.acquire()
 		entry_value = self.ack_buffer[entry_key]
-		if self.P.get_alive_including_me() <= entry_value[0]:
+		if self.P.get_correct() <= entry_value[0]:
 			self.deliverd_callback(entry_value[1], entry_key[0])
 			self.delivered_packets.add(entry_key)
 		self.deliverLock.release()
@@ -323,6 +317,9 @@ except Exception as e:
 	print "App Level Error"
 	traceback.print_exc(file=sys.stdout)
 	logging.exception(e)
+
+finally:
+	serversocket.close()
 
 # print "Press any key to continue.."
 raw_input()
