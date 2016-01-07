@@ -334,7 +334,8 @@ except Exception as e:
 
 finally:
 	# print "Press any key to continue.."
-	raw_input()
+	try: raw_input() # In case of hitting Ctr-C instead of anykey.
+	except: pass
 	serversocket.close()
 	logger.info("Exiting..")
 	logging.shutdown()
