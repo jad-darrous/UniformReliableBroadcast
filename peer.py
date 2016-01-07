@@ -19,11 +19,21 @@ hosts_file = sys.argv[1]
 peer_id = int(sys.argv[2]) - 1
 
 
-logfile_name = 'process%d.log'%(peer_id)
-with open(logfile_name, 'w'): pass
-# logging.basicConfig(level=logging.DEBUG)
-logging.basicConfig(filename=logfile_name, level=logging.DEBUG)
+def setup_logger(logger_name, log_file, level=logging.INFO):
+	l = logging.getLogger(logger_name)
+	formatter = logging.Formatter('%(asctime)s (%(threadName)-10s) # %(message)s')
+	fileHandler = logging.FileHandler(log_file, mode='w')
+	fileHandler.setFormatter(formatter)
+	# streamHandler = logging.StreamHandler()
+	# streamHandler.setFormatter(formatter)
+	l.setLevel(level)
+	l.addHandler(fileHandler)
+	# l.addHandler(streamHandler)
+	return l
 
+
+logfile_name = 'process%d.log' % peer_id
+logger = setup_logger("main", logfile_name, level=logging.DEBUG)
 
 endpoints = map(lambda u: (u.split(":")[0], int(u.split(":")[1])), open(hosts_file).read().split())
 
@@ -31,8 +41,8 @@ nb_peers = len(endpoints)
 peers_ids = range(nb_peers);
 peer_addr = endpoints[peer_id]
 
-print "peer started:", peer_addr, "id=", peer_id
-logging.info("peer started:" + str(peer_addr))
+print "peer started: ID=%d IP@=%s" % (peer_id, peer_addr)
+logger.info("peer started: ID=%d IP@=%s" % (peer_id, peer_addr))
 
 
 sockets_lst = [None] * nb_peers
@@ -45,14 +55,14 @@ sleep_alittle = time.sleep(random.random())
 
 def send_packet(pid, msg):
 	assert pid in peers_ids, "Wrong pid %d" % pid
-	# logging.debug('send_packet: sending [%s] to %d' % (msg, pid))
+	# logger.debug('send_packet: sending [%s] to %d' % (msg, pid))
 	s = sockets_lst[pid]
 	if s == None: return False
 	try:
 		s.send(toHex(len(msg)) + msg)
 		return True
 	except socket.error as e:
-		logging.debug('send_packet: socket fails when sending [%s] to %d' % (msg, pid))
+		logger.debug('send_packet: socket fails when sending [%s] to %d' % (msg, pid))
 		s.close()
 		sockets_lst[pid] = None
 		return False
@@ -69,7 +79,7 @@ def init_sockets():
 	serversocket.bind(peer_addr)
 	serversocket.listen(nb_peers)
 
-	logging.debug('init_sockets: connect..')
+	logger.debug('init_sockets: connect..')
 	for pid in range(nb_peers-1, peer_id, -1):
 		s = create_socket()
 		s.settimeout(10)
@@ -77,7 +87,7 @@ def init_sockets():
 		s.send(toHex(peer_id))
 		sockets_lst[pid] = s
 
-	logging.debug('init_sockets: accept..')
+	logger.debug('init_sockets: accept..')
 	for _ in range(peer_id):
 		clientsocket, address = serversocket.accept()
 		pid = eval(clientsocket.recv(4))
@@ -111,21 +121,21 @@ class SimpleTopicBasedPubSub():
 			self.notify = notify
 			self.cs = cs
 			self.pid = pid
-			self.name = datetime.datetime.now()
+			self.name = "Packet receiver [%d]" % pid
 
 		def run(self):
-			logging.debug('SimpleTopicBasedPubSub/ReceivePacket/run: Listen to pid = %d' % self.pid)
+			logger.debug('SimpleTopicBasedPubSub/ReceivePacket/run: Listen to pid = %d' % self.pid)
 			while True:
 				try:
 					packet_size = self.cs.recv(4)
 					if len(packet_size) == 0:
-						logging.debug('socket closed')
+						logger.debug('socket closed')
 						return
 					packet = self.cs.recv(eval(packet_size))
-					# logging.debug('SimpleTopicBasedPubSub/ReceivePacket/run: packet received from %d content:[%s]' % (self.pid, packet[0:20]))
+					# logger.debug('SimpleTopicBasedPubSub/ReceivePacket/run: packet received from %d content:[%s]' % (self.pid, packet[0:20]))
 					self.notify(packet, self.pid)
 				except socket.error as e:
-					logging.exception(e)
+					logger.exception(e)
 					return
 
 
@@ -144,6 +154,9 @@ class PerfectFailureDetector(threading.Thread):
 		self.threadLock = threading.Lock()
 		self._stopevent = threading.Event()
 
+		filename = 'process%d_pfd.log' % peer_id
+		self.logger = setup_logger("PFD", filename, level=logging.DEBUG)
+
 		packetPub.add_subscriber(self.packet_received, PerfectFailureDetector.TAG)
 
 	def run(self):
@@ -154,7 +167,7 @@ class PerfectFailureDetector(threading.Thread):
 		return set(self.alive)
 
 	def timeout(self):
-		# logging.debug('PerfectFailureDetector: timeout ' + str(self.ack_buffer))
+		self.logger.debug('timeout: ack_buffer = ' + str(self.ack_buffer))
 
 		self.threadLock.acquire()
 		if len(self.alive) != len(self.ack_buffer):
@@ -164,6 +177,8 @@ class PerfectFailureDetector(threading.Thread):
 			self.alive -= failed
 		self.ack_buffer = set()
 		self.threadLock.release()
+
+		self.logger.debug('correct processes so far = ' + str(self.alive))
 
 		if len(self.alive) > 0:
 			self.send_heartbeat()
@@ -178,8 +193,7 @@ class PerfectFailureDetector(threading.Thread):
 		return send_packet(pid, PerfectFailureDetector.TAG + msg)
 
 	def packet_received(self, msg, sender_id):
-
-		logging.debug('PerfectFailureDetector: packet received [%s] from pid = %d' % (msg, sender_id))
+		self.logger.debug('packet received [%s] from pid = %d' % (msg, sender_id))
 		if msg.startswith(PerfectFailureDetector.HeartBeatRequest):
 			self.send_pfd_packet(sender_id, PerfectFailureDetector.HeartBeatReply)
 		elif msg.startswith(PerfectFailureDetector.HeartBeatReply):
@@ -216,7 +230,7 @@ class UniformReliableBroadcast():
 		self.multicast(peers_ids, payload)
 
 	def multicast(self, peers_ids, payload):
-		logging.debug('UniformReliableBroadcast: broadcast %s' % payload)
+		logger.debug('URB: broadcast %s' % payload)
 		self.seqLock.acquire()
 		self.seq = self.seq + 1
 		seq_nb = self.seq
@@ -230,7 +244,7 @@ class UniformReliableBroadcast():
 
 	def packet_received(self, msg, sender_id):
 
-		logging.debug('UniformReliableBroadcast: deliver %s' % msg)
+		logger.debug('URB: deliver %s' % msg)
 		org_sender_id, seq_nb, payload = eval(msg)
 
 		if not (org_sender_id, seq_nb) in self.ack_buffer:
@@ -248,7 +262,7 @@ class UniformReliableBroadcast():
 
 		self.check_for_delivery((org_sender_id, seq_nb))
 
-		logging.debug('UniformReliableBroadcast: deliver %s %s' % \
+		logger.debug('URB: deliver %s %s' % \
 		 (str(self.ack_buffer[(org_sender_id, seq_nb)][0]), str(self.P.alive)))
 
 	def check_for_delivery(self, entry_key):
@@ -262,8 +276,8 @@ class UniformReliableBroadcast():
 		self.deliverLock.release()
 
 	def proc_failed(self, pid):
-		print 'UniformReliableBroadcast: process failed %d' % pid
-		logging.debug('UniformReliableBroadcast: process failed %d' % pid)
+		print 'URB: process failed id=%d' % pid
+		logger.debug('URB: process failed id=%d' % pid)
 		self.correct.remove(pid)
 		self.ackDictLock.acquire()
 		for k in self.ack_buffer:
@@ -292,13 +306,13 @@ class App():
 
 	def deliver(self, msg, sender):
 		print "delivered msg:", msg
-		logging.debug('App: deliver [%s] from %d' % (msg, sender))
+		logger.debug('App: deliver [%s] from %d' % (msg, sender))
 
 
 def terminate_peer(msg):
 	if msg == "KILL":
 		print "Exiting.."
-		logging.debug('#'*80)
+		logger.debug('#'*80)
 		app.urb.P._stopevent.set()
 		sys.exit(0)
 
@@ -307,7 +321,7 @@ def terminate_peer(msg):
 try:
 	packetPub = SimpleTopicBasedPubSub()
 	init_sockets()
-	logging.info("Sockets are ready.")
+	logger.info("Sockets are ready.")
 	print "Sockets are ready."
 	# packetPub.add_subscriber(terminate_peer, "CTL")
 	app = App()
@@ -316,10 +330,11 @@ try:
 except Exception as e:
 	print "App Level Error"
 	traceback.print_exc(file=sys.stdout)
-	logging.exception(e)
+	logger.exception(e)
 
 finally:
+	# print "Press any key to continue.."
+	raw_input()
 	serversocket.close()
-
-# print "Press any key to continue.."
-raw_input()
+	logger.info("Exiting..")
+	logging.shutdown()
