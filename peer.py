@@ -150,22 +150,22 @@ class PerfectFailureDetector(threading.Thread):
 	HeartBeatRequest = "HeartBeatRequest"
 	HeartBeatReply = "HeartBeatReply"
 
+	delta = 2 # in seconds, time between sending consecutive heartbeats
+
 	def __init__(self, notify_callback, peers_ids):
 		threading.Thread.__init__(self)
-		self.delta = 3
+
 		self.alive = set(filter(lambda u: u != peer_id, peers_ids))
 		self.notify = notify_callback
 		self.ack_buffer = set()
-		self.threadLock = threading.Lock()
-		self._stopevent = threading.Event()
-
+		self.ack_buffer_lock = threading.Lock()
  		self.logger = logging.getLogger("PFD")
 
 		packetPub.add_subscriber(self.packet_received, PerfectFailureDetector.TAG)
 
 	def run(self):
 		self.send_heartbeat()
-		threading.Timer(self.delta * 2, self.timeout).start()
+		threading.Timer(PerfectFailureDetector.delta * 3, self.timeout).start()
 
 	def get_correct(self):
 		return set(self.alive)
@@ -173,21 +173,20 @@ class PerfectFailureDetector(threading.Thread):
 	def timeout(self):
 		self.logger.debug('timeout: ack_buffer = ' + str(self.ack_buffer))
 
-		self.threadLock.acquire()
+		self.ack_buffer_lock.acquire()
 		if len(self.alive) != len(self.ack_buffer):
 			failed = self.alive - self.ack_buffer
 			for pid in failed:
 				self.notify(pid)
 			self.alive -= failed
 		self.ack_buffer = set()
-		self.threadLock.release()
+		self.ack_buffer_lock.release()
 
 		self.logger.debug('correct processes so far = ' + str(self.alive))
 
 		if len(self.alive) > 0:
 			self.send_heartbeat()
-			if not self._stopevent.isSet():
-				threading.Timer(self.delta, self.timeout).start()
+			threading.Timer(PerfectFailureDetector.delta, self.timeout).start()
 		else:
 			self.logger.info('All processes are dead!')
 
@@ -201,12 +200,12 @@ class PerfectFailureDetector(threading.Thread):
 
 	def packet_received(self, msg, sender_id):
 		self.logger.debug('packet received [%s] from pid = %d' % (msg, sender_id))
-		if msg.startswith(PerfectFailureDetector.HeartBeatRequest):
+		if msg == PerfectFailureDetector.HeartBeatRequest:
 			self.send_pfd_packet(sender_id, PerfectFailureDetector.HeartBeatReply)
-		elif msg.startswith(PerfectFailureDetector.HeartBeatReply):
-			self.threadLock.acquire()
+		elif msg == PerfectFailureDetector.HeartBeatReply:
+			self.ack_buffer_lock.acquire()
 			self.ack_buffer.add(sender_id)
-			self.threadLock.release()
+			self.ack_buffer_lock.release()
 
 
 class UniformReliableBroadcast():
@@ -318,7 +317,6 @@ def terminate_peer(msg):
 	if msg == "KILL":
 		print "Exiting.."
 		logger.debug('#'*80)
-		app.urb.P._stopevent.set()
 		sys.exit(0)
 
 
