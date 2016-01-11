@@ -19,21 +19,27 @@ hosts_file = sys.argv[1]
 peer_id = int(sys.argv[2]) - 1
 
 
-def setup_logger(logger_name, log_file, level=logging.INFO):
+def setup_logger(logger_name, log_file):
 	l = logging.getLogger(logger_name)
+	l.setLevel(logging.DEBUG)
+
 	formatter = logging.Formatter('%(asctime)s (%(threadName)-10s) # %(message)s')
-	fileHandler = logging.FileHandler(log_file, mode='w')
-	fileHandler.setFormatter(formatter)
-	# streamHandler = logging.StreamHandler()
-	# streamHandler.setFormatter(formatter)
-	l.setLevel(level)
-	l.addHandler(fileHandler)
-	# l.addHandler(streamHandler)
+	logFile = logging.FileHandler(log_file, mode='w')
+	logFile.setFormatter(formatter)
+	logFile.setLevel(logging.DEBUG)
+	l.addHandler(logFile)
+
+	short_formatter = logging.Formatter('%(message)s')
+	console = logging.StreamHandler()
+	console.setFormatter(short_formatter)
+	console.setLevel(logging.INFO)
+	l.addHandler(console)
+
 	return l
 
 
-logfile_name = 'process%d.log' % peer_id
-logger = setup_logger("main", logfile_name, level=logging.DEBUG)
+logger = setup_logger("main", 'process%d.log' % peer_id)
+setup_logger("PFD", 'process%d_pfd.log' % peer_id)
 
 endpoints = map(lambda u: (u.split(":")[0], int(u.split(":")[1])), open(hosts_file).read().split())
 
@@ -41,7 +47,6 @@ nb_peers = len(endpoints)
 peers_ids = range(nb_peers);
 peer_addr = endpoints[peer_id]
 
-print "peer started: ID=%d IP@=%s" % (peer_id, peer_addr)
 logger.info("peer started: ID=%d IP@=%s" % (peer_id, peer_addr))
 
 
@@ -154,8 +159,7 @@ class PerfectFailureDetector(threading.Thread):
 		self.threadLock = threading.Lock()
 		self._stopevent = threading.Event()
 
-		filename = 'process%d_pfd.log' % peer_id
-		self.logger = setup_logger("PFD", filename, level=logging.DEBUG)
+ 		self.logger = logging.getLogger("PFD")
 
 		packetPub.add_subscriber(self.packet_received, PerfectFailureDetector.TAG)
 
@@ -184,6 +188,9 @@ class PerfectFailureDetector(threading.Thread):
 			self.send_heartbeat()
 			if not self._stopevent.isSet():
 				threading.Timer(self.delta, self.timeout).start()
+		else:
+			self.logger.info('All processes are dead!')
+
 
 	def send_heartbeat(self):
 		for pid in self.alive:
@@ -230,7 +237,7 @@ class UniformReliableBroadcast():
 		self.multicast(peers_ids, payload)
 
 	def multicast(self, peers_ids, payload):
-		logger.debug('URB: broadcast %s' % payload)
+		logger.info('URB: broadcast [%s]' % payload)
 		self.seqLock.acquire()
 		self.seq = self.seq + 1
 		seq_nb = self.seq
@@ -244,7 +251,7 @@ class UniformReliableBroadcast():
 
 	def packet_received(self, msg, sender_id):
 
-		logger.debug('URB: deliver %s' % msg)
+		logger.debug('URB: packet_received %s' % msg)
 		org_sender_id, seq_nb, payload = eval(msg)
 
 		if not (org_sender_id, seq_nb) in self.ack_buffer:
@@ -262,7 +269,7 @@ class UniformReliableBroadcast():
 
 		self.check_for_delivery((org_sender_id, seq_nb))
 
-		logger.debug('URB: deliver %s %s' % \
+		logger.debug('URB: packet_received ack=%s correct=%s' % \
 		 (str(self.ack_buffer[(org_sender_id, seq_nb)][0]), str(self.P.alive)))
 
 	def check_for_delivery(self, entry_key):
@@ -276,8 +283,7 @@ class UniformReliableBroadcast():
 		self.deliverLock.release()
 
 	def proc_failed(self, pid):
-		print 'URB: process failed id=%d' % pid
-		logger.debug('URB: process failed id=%d' % pid)
+		logger.info('URB: peer with id = %d failed' % pid)
 		self.correct.remove(pid)
 		self.ackDictLock.acquire()
 		for k in self.ack_buffer:
@@ -305,8 +311,7 @@ class App():
 			self.urb.broadcast("Good-bye!")
 
 	def deliver(self, msg, sender):
-		print "delivered msg:", msg
-		logger.debug('App: deliver [%s] from %d' % (msg, sender))
+		logger.info('App: deliver [%s] from peer with id = %d' % (msg, sender))
 
 
 def terminate_peer(msg):
@@ -322,13 +327,12 @@ try:
 	packetPub = SimpleTopicBasedPubSub()
 	init_sockets()
 	logger.info("Sockets are ready.")
-	print "Sockets are ready."
 	# packetPub.add_subscriber(terminate_peer, "CTL")
 	app = App()
 	app.main()
 
 except Exception as e:
-	print "App Level Error"
+	print "!! App Level Error !!"
 	traceback.print_exc(file=sys.stdout)
 	logger.exception(e)
 
