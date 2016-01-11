@@ -176,9 +176,9 @@ class PerfectFailureDetector(threading.Thread):
 		self.ack_buffer_lock.acquire()
 		if len(self.alive) != len(self.ack_buffer):
 			failed = self.alive - self.ack_buffer
+			self.alive -= failed
 			for pid in failed:
 				self.notify(pid)
-			self.alive -= failed
 		self.ack_buffer = set()
 		self.ack_buffer_lock.release()
 
@@ -212,15 +212,13 @@ class UniformReliableBroadcast():
 
 	TAG = "URB"
 
-	def __init__(self, deliverd_callback):
-		self.deliverd_callback = deliverd_callback
-		self.name = datetime.datetime.now()
+	def __init__(self, delivered_callback):
+		self.delivered_callback = delivered_callback
+
 		self.seq = 0
 		self.ack_buffer = dict()
 		self.pending = set()
-		self.delivered_packets = set()
-		self.correct = set(peers_ids)
-		self.correct.remove(peer_id)
+		self.delivered = set()
 
 		self.seqLock = threading.Lock()
 		self.ackDictLock = threading.Lock()
@@ -228,7 +226,7 @@ class UniformReliableBroadcast():
 
 		packetPub.add_subscriber(self.packet_received, UniformReliableBroadcast.TAG)
 
-		self.P = PerfectFailureDetector(self.proc_failed, peers_ids)
+		self.P = PerfectFailureDetector(self.peer_failed, peers_ids)
 		self.P.setDaemon(True)
 		self.P.start()
 
@@ -245,48 +243,52 @@ class UniformReliableBroadcast():
 		self.send_to_all(peer_id, seq_nb, payload)
 
 	def send_to_all(self, org_sender_id, seq_nb, payload):
-		for pid in self.correct:
-			send_packet(pid, UniformReliableBroadcast.TAG + str((org_sender_id, seq_nb, payload)))
+		for pid in self.P.get_correct():
+			serialized_msg = str((org_sender_id, seq_nb, payload))
+			send_packet(pid, UniformReliableBroadcast.TAG + serialized_msg)
 
 	def packet_received(self, msg, sender_id):
 
 		logger.debug('URB: packet_received %s' % msg)
 		org_sender_id, seq_nb, payload = eval(msg)
 
-		if not (org_sender_id, seq_nb) in self.ack_buffer:
+		msg_uid = (org_sender_id, seq_nb)
+
+		if msg_uid in self.delivered:
+			logger.debug('The msg was already delivered')
+			return
+
+		if not msg_uid in self.ack_buffer:
 			self.ackDictLock.acquire()
-			self.ack_buffer[(org_sender_id, seq_nb)] = (set([]), payload)
+			self.ack_buffer[msg_uid] = (set([]), payload)
 			self.ackDictLock.release()
 
-		recv_ack = self.ack_buffer[(org_sender_id, seq_nb)][0]
-		# if not sender_id in recv_ack:
-		if not (org_sender_id, seq_nb) in self.pending:
-			self.pending.add((org_sender_id, seq_nb))
+		if not msg_uid in self.pending:
+			self.pending.add(msg_uid)
 			self.send_to_all(org_sender_id, seq_nb, payload)
 
-		self.ack_buffer[(org_sender_id, seq_nb)][0].add(sender_id)
+		self.ack_buffer[msg_uid][0].add(sender_id)
 
-		self.check_for_delivery((org_sender_id, seq_nb))
+		self.check_for_delivery(msg_uid)
 
 		logger.debug('URB: packet_received ack=%s correct=%s' % \
-		 (str(self.ack_buffer[(org_sender_id, seq_nb)][0]), str(self.P.alive)))
+		 (str(self.ack_buffer[msg_uid][0]), str(self.P.get_correct())))
 
-	def check_for_delivery(self, entry_key):
-		if entry_key in self.delivered_packets:
+	def check_for_delivery(self, msg_uid):
+		if msg_uid in self.delivered:
 			return
 		self.deliverLock.acquire()
-		entry_value = self.ack_buffer[entry_key]
-		if self.P.get_correct() <= entry_value[0]:
-			self.deliverd_callback(entry_value[1], entry_key[0])
-			self.delivered_packets.add(entry_key)
+		acks_ids, payload = self.ack_buffer[msg_uid]
+		if self.P.get_correct() <= acks_ids:
+			self.delivered_callback(payload, msg_uid[0])
+			self.delivered.add(msg_uid)
 		self.deliverLock.release()
 
-	def proc_failed(self, pid):
+	def peer_failed(self, pid):
 		logger.info('URB: peer with id = %d failed' % pid)
-		self.correct.remove(pid)
 		self.ackDictLock.acquire()
-		for k in self.ack_buffer:
-			self.check_for_delivery(k)
+		for msg_uid in self.ack_buffer:
+			self.check_for_delivery(msg_uid)
 		self.ackDictLock.release()
 
 
